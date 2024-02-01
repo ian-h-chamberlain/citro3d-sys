@@ -24,11 +24,13 @@ pub mod render;
 pub mod shader;
 pub mod texenv;
 pub mod uniform;
+mod util;
 
 use std::cell::OnceCell;
 use std::fmt;
 
 pub use error::{Error, Result};
+use util::is_linear_ptr;
 
 use self::texenv::TexEnv;
 use self::uniform::Uniform;
@@ -159,7 +161,6 @@ impl Instance {
         self.set_buffer_info(vbo_data.info());
 
         // TODO: should we also require the attrib info directly here?
-
         unsafe {
             citro3d_sys::C3D_DrawArrays(
                 primitive as ctru_sys::GPU_Primitive_t,
@@ -167,6 +168,44 @@ impl Instance {
                 vbo_data.len(),
             );
         }
+    }
+    /// Indexed drawing
+    ///
+    /// Draws the vertices in `buf` indexed by `indices`. `indices` must be linearly allocated
+    ///
+    /// # Safety
+    /// If `indices` goes out of scope before the current frame ends it will cause a use-after-free (possibly by the GPU)
+    /// If `buf` does not contain all the vertices references by `indices` it will cause an invalid access by the GPU (this crashes citra)
+    ///
+    /// # Panics
+    /// If `indices` is not allocated in linear memory
+    #[doc(alias = "C3D_DrawElements")]
+    pub unsafe fn draw_elements<'a>(
+        &mut self,
+        primitive: buffer::Primitive,
+        buf: &buffer::Info,
+        indices: impl Into<IndexType<'a>>,
+    ) {
+        self.set_buffer_info(buf);
+        let indices: IndexType<'a> = indices.into();
+        let elements = match indices {
+            IndexType::U16(v) => v.as_ptr() as *const _,
+            IndexType::U8(v) => v.as_ptr() as *const _,
+        };
+        assert!(
+            is_linear_ptr(elements),
+            "draw_elements requires linear allocated indices buffer"
+        );
+        citro3d_sys::C3D_DrawElements(
+            primitive as ctru_sys::GPU_Primitive_t,
+            indices.len() as i32,
+            // flag bit for short or byte
+            match indices {
+                IndexType::U16(_) => citro3d_sys::C3D_UNSIGNED_SHORT,
+                IndexType::U8(_) => citro3d_sys::C3D_UNSIGNED_BYTE,
+            } as i32,
+            elements,
+        );
     }
 
     /// Use the given [`shader::Program`] for subsequent draw calls.
@@ -242,5 +281,30 @@ impl Drop for Instance {
         unsafe {
             citro3d_sys::C3D_Fini();
         }
+    }
+}
+
+pub enum IndexType<'a> {
+    U16(&'a [u16]),
+    U8(&'a [u8]),
+}
+impl IndexType<'_> {
+    fn len(&self) -> usize {
+        match self {
+            IndexType::U16(a) => a.len(),
+            IndexType::U8(a) => a.len(),
+        }
+    }
+}
+
+impl<'a> From<&'a [u8]> for IndexType<'a> {
+    fn from(v: &'a [u8]) -> Self {
+        Self::U8(v)
+    }
+}
+
+impl<'a> From<&'a [u16]> for IndexType<'a> {
+    fn from(v: &'a [u16]) -> Self {
+        Self::U16(v)
     }
 }
